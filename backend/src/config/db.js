@@ -1,5 +1,9 @@
 const { Pool } = require('pg');
+const dns = require('dns');
 require('dotenv').config();
+
+// Force IPv4 — fixes Render free tier IPv6 issue with Supabase
+dns.setDefaultResultOrder('ipv4first');
 
 // Pool configuration for Supabase (connection pooling)
 // DATABASE_URL format: postgres://postgres.[USER]:[PASS]@[HOST]:5432/postgres
