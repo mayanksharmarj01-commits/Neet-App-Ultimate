@@ -1,0 +1,13 @@
+node_modules/
+.env
+dist/
+build/
+.DS_Store
+*.log
+.gemini/
+.agent/
+task.md
+implementation_plan.md
+walkthrough.md
+COMPLETE_FIX_SUMMARY.md
+FIX_SUMMARY.md

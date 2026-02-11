@@ -1,0 +1,213 @@
+@import "tailwindcss";
+
+:root {
+  --primary: #0ea5e9;
+  --secondary: #6366f1;
+  --background: #0f172a;
+  --foreground: #f8fafc;
+}
+
+@layer base {
+  * {
+    @apply transition-colors duration-200;
+  }
+
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased overflow-x-hidden;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply tracking-tight;
+    font-family: 'Outfit', sans-serif;
+  }
+
+  /* Custom Scrollbar */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0f172a;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #334155;
+    border-radius: 4px;
+    transition: background 0.3s ease;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #475569;
+  }
+
+  /* Selection */
+  ::selection {
+    background: rgba(14, 165, 233, 0.3);
+    color: #f8fafc;
+  }
+}
+
+@layer components {
+
+  /* Glassmorphism Utilities */
+  .glass-card {
+    @apply bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl shadow-xl;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .glass-card:hover {
+    @apply bg-white/10 border-white/20;
+    transform: translateY(-2px);
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
+  }
+
+  .btn-premium {
+    @apply relative overflow-hidden px-6 py-3 rounded-xl font-bold text-white bg-gradient-to-r from-sky-600 to-indigo-600 shadow-lg;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .btn-premium:hover {
+    @apply scale-105 shadow-sky-500/25;
+    box-shadow: 0 20px 40px -12px rgba(14, 165, 233, 0.4);
+  }
+
+  .btn-premium:active {
+    @apply scale-95;
+  }
+
+  .neet-gradient-text {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-sky-400 to-indigo-400 font-extrabold;
+  }
+
+  /* Input Focus Animations */
+  input:focus,
+  textarea:focus {
+    transform: scale(1.01);
+  }
+
+  /* Card Hover Lift */
+  .hover-lift {
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .hover-lift:hover {
+    transform: translateY(-8px);
+    box-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.5);
+  }
+}
+
+@layer utilities {
+
+  /* Background Gradients */
+  .bg-grid-white {
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='rgb(255 255 255 / 0.05)'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e");
+  }
+
+  /* Smooth Animations */
+  .animate-pulse-slow {
+    animation: pulse-slow 8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  .animate-float {
+    animation: float 6s ease-in-out infinite;
+  }
+
+  .animate-glow {
+    animation: glow 3s ease-in-out infinite alternate;
+  }
+
+  .animate-shimmer {
+    animation: shimmer 2s linear infinite;
+  }
+}
+
+/* Animations */
+@keyframes pulse-slow {
+
+  0%,
+  100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.7;
+    transform: scale(1.05);
+  }
+}
+
+@keyframes float {
+
+  0%,
+  100% {
+    transform: translateY(0px);
+  }
+
+  50% {
+    transform: translateY(-20px);
+  }
+}
+
+@keyframes glow {
+  from {
+    box-shadow: 0 0 20px rgba(14, 165, 233, 0.3);
+  }
+
+  to {
+    box-shadow: 0 0 40px rgba(14, 165, 233, 0.6), 0 0 60px rgba(99, 102, 241, 0.4);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -1000px 0;
+  }
+
+  100% {
+    background-position: 1000px 0;
+  }
+}
+
+/* Page Transitions */
+.page-enter {
+  opacity: 0;
+  transform: translateY(20px);
+}
+
+.page-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.page-exit {
+  opacity: 1;
+}
+
+.page-exit-active {
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+/* Smooth Scroll */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Loading Spinner */
+@keyframes spin-slow {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin-slow {
+  animation: spin-slow 3s linear infinite;
+}
