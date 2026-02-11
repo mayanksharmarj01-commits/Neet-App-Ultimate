@@ -1,10 +1,9 @@
-const db = require('../config/db');
+const { db } = require('../config/db');
 const catchAsync = require('../utils/catchAsync');
 const AppError = require('../utils/appError');
 
 class SocialController {
-    // Search users by name
-    searchUsers = catchAsync(async (req, res, next) => {
+    searchUsers = catchAsync(async (req, res) => {
         const { query } = req.query;
         const currentUserId = req.user.id;
 
@@ -16,37 +15,43 @@ class SocialController {
             });
         }
 
-        const searchQuery = `
-            SELECT 
-                u.id, 
-                u.name, 
-                u.email,
-                u.xp,
-                (SELECT COUNT(*) FROM followers WHERE following_id = u.id) as followers_count,
-                EXISTS(
-                    SELECT 1 FROM followers 
-                    WHERE follower_id = $1 AND following_id = u.id
-                ) as is_following
-            FROM users u
-            WHERE 
-                u.id != $1 
-                AND LOWER(u.name) LIKE LOWER($2)
-            ORDER BY u.xp DESC
-            LIMIT 20
-        `;
+        // Firestore doesn't support LIKE queries - use range query on name
+        const searchLower = query.toLowerCase();
+        const usersSnapshot = await db.collection('users')
+            .orderBy('name')
+            .get();
 
-        const result = await db.query(searchQuery, [currentUserId, `%${query}%`]);
+        const users = [];
+        for (const doc of usersSnapshot.docs) {
+            if (doc.id === currentUserId) continue;
+            const userData = doc.data();
+            if (userData.name && userData.name.toLowerCase().includes(searchLower)) {
+                // Check following status
+                const followDoc = await db.collection('followers')
+                    .where('follower_id', '==', currentUserId)
+                    .where('following_id', '==', doc.id)
+                    .limit(1)
+                    .get();
+
+                users.push({
+                    id: doc.id,
+                    name: userData.name,
+                    email: userData.email,
+                    xp: userData.xp || 0,
+                    profile_picture: userData.profile_picture,
+                    is_following: !followDoc.empty
+                });
+            }
+            if (users.length >= 20) break;
+        }
 
         res.status(200).json({
             status: 'success',
-            results: result.rows.length,
-            data: {
-                users: result.rows
-            }
+            results: users.length,
+            data: { users }
         });
     });
 
-    // Follow a user
     followUser = catchAsync(async (req, res, next) => {
         const { userId } = req.params;
         const currentUserId = req.user.id;
@@ -55,20 +60,21 @@ class SocialController {
             return next(new AppError('You cannot follow yourself', 400));
         }
 
-        // Check if already following
-        const existing = await db.query(
-            'SELECT id FROM followers WHERE follower_id = $1 AND following_id = $2',
-            [currentUserId, userId]
-        );
+        const existing = await db.collection('followers')
+            .where('follower_id', '==', currentUserId)
+            .where('following_id', '==', userId)
+            .limit(1)
+            .get();
 
-        if (existing.rows.length > 0) {
+        if (!existing.empty) {
             return next(new AppError('You are already following this user', 400));
         }
 
-        await db.query(
-            'INSERT INTO followers (follower_id, following_id) VALUES ($1, $2)',
-            [currentUserId, userId]
-        );
+        await db.collection('followers').add({
+            follower_id: currentUserId,
+            following_id: userId,
+            created_at: new Date().toISOString()
+        });
 
         res.status(201).json({
             status: 'success',
@@ -76,19 +82,22 @@ class SocialController {
         });
     });
 
-    // Unfollow a user
     unfollowUser = catchAsync(async (req, res, next) => {
         const { userId } = req.params;
         const currentUserId = req.user.id;
 
-        const result = await db.query(
-            'DELETE FROM followers WHERE follower_id = $1 AND following_id = $2 RETURNING id',
-            [currentUserId, userId]
-        );
+        const snapshot = await db.collection('followers')
+            .where('follower_id', '==', currentUserId)
+            .where('following_id', '==', userId)
+            .get();
 
-        if (result.rows.length === 0) {
+        if (snapshot.empty) {
             return next(new AppError('You are not following this user', 400));
         }
+
+        const batch = db.batch();
+        snapshot.docs.forEach(doc => batch.delete(doc.ref));
+        await batch.commit();
 
         res.status(200).json({
             status: 'success',
@@ -96,84 +105,61 @@ class SocialController {
         });
     });
 
-    // Get user's network (people they are following)
     getMyNetwork = catchAsync(async (req, res) => {
         const currentUserId = req.user.id;
 
-        const query = `
-            SELECT 
-                u.id,
-                u.name,
-                u.xp,
-                f.created_at as followed_at
-            FROM followers f
-            JOIN users u ON f.following_id = u.id
-            WHERE f.follower_id = $1
-            ORDER BY f.created_at DESC
-        `;
+        const followingSnapshot = await db.collection('followers')
+            .where('follower_id', '==', currentUserId)
+            .orderBy('created_at', 'desc')
+            .get();
 
-        const result = await db.query(query, [currentUserId]);
+        const network = [];
+        for (const doc of followingSnapshot.docs) {
+            const followData = doc.data();
+            const userDoc = await db.collection('users').doc(followData.following_id).get();
+            if (userDoc.exists) {
+                network.push({
+                    id: userDoc.id,
+                    name: userDoc.data().name,
+                    xp: userDoc.data().xp || 0,
+                    profile_picture: userDoc.data().profile_picture,
+                    followed_at: followData.created_at
+                });
+            }
+        }
 
         res.status(200).json({
             status: 'success',
-            results: result.rows.length,
-            data: {
-                network: result.rows
-            }
+            results: network.length,
+            data: { network }
         });
     });
 
-    // Get public profile of a user
     getUserProfile = catchAsync(async (req, res, next) => {
         const { userId } = req.params;
 
-        const profileQuery = `
-            SELECT 
-                u.id,
-                u.name,
-                u.xp,
-                u.created_at,
-                (SELECT COUNT(*) FROM followers WHERE following_id = u.id) as followers_count,
-                (SELECT COUNT(*) FROM followers WHERE follower_id = u.id) as following_count
-            FROM users u
-            WHERE u.id = $1
-        `;
-
-        const result = await db.query(profileQuery, [userId]);
-
-        if (result.rows.length === 0) {
+        const userDoc = await db.collection('users').doc(userId).get();
+        if (!userDoc.exists) {
             return next(new AppError('User not found', 404));
         }
 
-        // Get weakest subject (lowest progress)
-        const weakestSubjectQuery = `
-            SELECT 
-                s.name as subject_name,
-                ROUND(
-                    (COUNT(DISTINCT a.question_id)::NUMERIC / NULLIF(COUNT(DISTINCT q.id), 0)) * 100,
-                    2
-                ) AS progress
-            FROM subjects s
-            LEFT JOIN chapters c ON s.id = c.subject_id
-            LEFT JOIN questions q ON c.id = q.chapter_id
-            LEFT JOIN attempts a ON q.id = a.question_id AND a.user_id = $1
-            GROUP BY s.id, s.name
-            ORDER BY progress ASC NULLS FIRST
-            LIMIT 1
-        `;
-
-        const weakestResult = await db.query(weakestSubjectQuery, [userId]);
+        const followersSnapshot = await db.collection('followers')
+            .where('following_id', '==', userId).get();
+        const followingSnapshot = await db.collection('followers')
+            .where('follower_id', '==', userId).get();
 
         const profile = {
-            ...result.rows[0],
-            weakest_subject: weakestResult.rows[0] || null
+            id: userDoc.id,
+            name: userDoc.data().name,
+            xp: userDoc.data().xp || 0,
+            created_at: userDoc.data().created_at,
+            followers_count: followersSnapshot.size,
+            following_count: followingSnapshot.size
         };
 
         res.status(200).json({
             status: 'success',
-            data: {
-                profile
-            }
+            data: { profile }
         });
     });
 }

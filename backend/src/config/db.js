@@ -1,28 +1,23 @@
-const { Pool } = require('pg');
-const dns = require('dns');
+const admin = require('firebase-admin');
 require('dotenv').config();
 
-// Force IPv4 — fixes Render free tier IPv6 issue with Supabase
-dns.setDefaultResultOrder('ipv4first');
+// Initialize Firebase Admin SDK
+if (!admin.apps.length) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
 
-// Pool configuration for Supabase (connection pooling)
-// DATABASE_URL format: postgres://postgres.[USER]:[PASS]@[HOST]:5432/postgres
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false // Required for Supabase/Heroku in many cases
+    if (serviceAccount.project_id) {
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
+    } else {
+        // Fallback: try default credentials
+        admin.initializeApp();
     }
-});
+}
 
-pool.on('connect', () => {
-    console.log('✅ Grand Hierarchy Database Connected');
-});
+const db = admin.firestore();
+const auth = admin.auth();
 
-pool.on('error', (err) => {
-    console.error('❌ Database Pool Error:', err);
-});
+console.log('✅ Firebase Firestore Connected');
 
-module.exports = {
-    query: (text, params) => pool.query(text, params),
-    pool
-};
+module.exports = { db, auth, admin };

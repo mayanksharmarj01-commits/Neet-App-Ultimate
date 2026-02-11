@@ -1,113 +1,125 @@
-const db = require('../config/db');
+const { db } = require('../config/db');
 const catchAsync = require('../utils/catchAsync');
 const AppError = require('../utils/appError');
 
 class TeacherController {
-    // Get students following this teacher
     getMyStudents = catchAsync(async (req, res) => {
         const teacherId = req.user.id;
 
-        const query = `
-            SELECT 
-                u.id,
-                u.name,
-                u.email,
-                u.xp,
-                u.created_at,
-                f.created_at as followed_at,
-                (SELECT COUNT(*) FROM attempts WHERE user_id = u.id) as total_attempts,
-                (SELECT COUNT(*) FROM attempts WHERE user_id = u.id AND is_correct = false) as wrong_attempts
-            FROM followers f
-            JOIN users u ON f.follower_id = u.id
-            WHERE f.following_id = $1
-            ORDER BY f.created_at DESC
-        `;
+        const followersSnapshot = await db.collection('followers')
+            .where('following_id', '==', teacherId)
+            .orderBy('created_at', 'desc')
+            .get();
 
-        const result = await db.query(query, [teacherId]);
+        const students = [];
+        for (const doc of followersSnapshot.docs) {
+            const followData = doc.data();
+            const userDoc = await db.collection('users').doc(followData.follower_id).get();
+            if (userDoc.exists) {
+                const userData = userDoc.data();
+
+                // Get attempt counts
+                const attemptsSnapshot = await db.collection('attempts')
+                    .where('user_id', '==', followData.follower_id).get();
+                const wrongAttempts = attemptsSnapshot.docs.filter(d => !d.data().is_correct).length;
+
+                students.push({
+                    id: userDoc.id,
+                    name: userData.name,
+                    email: userData.email,
+                    xp: userData.xp || 0,
+                    created_at: userData.created_at,
+                    followed_at: followData.created_at,
+                    total_attempts: attemptsSnapshot.size,
+                    wrong_attempts: wrongAttempts
+                });
+            }
+        }
 
         res.status(200).json({
             status: 'success',
-            results: result.rows.length,
-            data: {
-                students: result.rows
-            }
+            results: students.length,
+            data: { students }
         });
     });
 
-    // Get student analytics (weak chapters and recent mistakes)
     getStudentAnalytics = catchAsync(async (req, res, next) => {
         const { studentId } = req.params;
         const teacherId = req.user.id;
 
-        // Verify teacher-student relationship
-        const relationship = await db.query(
-            'SELECT id FROM followers WHERE follower_id = $1 AND following_id = $2',
-            [studentId, teacherId]
-        );
+        // Verify relationship
+        const relationship = await db.collection('followers')
+            .where('follower_id', '==', studentId)
+            .where('following_id', '==', teacherId)
+            .limit(1)
+            .get();
 
-        if (relationship.rows.length === 0) {
+        if (relationship.empty) {
             return next(new AppError('This student does not follow you', 403));
         }
 
-        // Get weak chapters (lowest accuracy)
-        const weakChapters = await db.query(
-            `SELECT 
-                c.id,
-                c.name as chapter_name,
-                s.name as subject_name,
-                COUNT(DISTINCT a.question_id) as attempted,
-                SUM(CASE WHEN a.is_correct THEN 1 ELSE 0 END) as correct,
-                ROUND(
-                    (SUM(CASE WHEN a.is_correct THEN 1 ELSE 0 END)::NUMERIC / 
-                    NULLIF(COUNT(DISTINCT a.question_id), 0)) * 100, 2
-                ) as accuracy
-            FROM chapters c
-            JOIN subjects s ON c.subject_id = s.id
-            LEFT JOIN questions q ON q.chapter_id = c.id
-            LEFT JOIN attempts a ON a.question_id = q.id AND a.user_id = $1
-            WHERE a.id IS NOT NULL
-            GROUP BY c.id, c.name, s.name
-            HAVING COUNT(DISTINCT a.question_id) > 0
-            ORDER BY accuracy ASC NULLS FIRST, attempted DESC
-            LIMIT 5`,
-            [studentId]
-        );
+        // Get student's attempts
+        const attemptsSnapshot = await db.collection('attempts')
+            .where('user_id', '==', studentId)
+            .get();
 
-        // Get recent mistakes (last 10 wrong attempts)
-        const recentMistakes = await db.query(
-            `SELECT 
-                q.id as question_id,
-                q.question_text,
-                q.option_a,
-                q.option_b,
-                q.option_c,
-                q.option_d,
-                q.correct_answer,
-                q.explanation,
-                a.user_answer,
-                a.attempted_at,
-                c.name as chapter_name,
-                s.name as subject_name
-            FROM attempts a
-            JOIN questions q ON a.question_id = q.id
-            JOIN chapters c ON q.chapter_id = c.id
-            JOIN subjects s ON c.subject_id = s.id
-            WHERE a.user_id = $1 AND a.is_correct = false
-            ORDER BY a.attempted_at DESC
-            LIMIT 10`,
-            [studentId]
-        );
+        // Build weak chapters analysis
+        const chapterStats = {};
+        for (const doc of attemptsSnapshot.docs) {
+            const attempt = doc.data();
+            if (attempt.chapter_id) {
+                if (!chapterStats[attempt.chapter_id]) {
+                    chapterStats[attempt.chapter_id] = { correct: 0, total: 0 };
+                }
+                chapterStats[attempt.chapter_id].total++;
+                if (attempt.is_correct) chapterStats[attempt.chapter_id].correct++;
+            }
+        }
+
+        // Get chapter details
+        const weakChapters = [];
+        for (const [chapterId, stats] of Object.entries(chapterStats)) {
+            const chapterDoc = await db.collection('chapters').doc(chapterId).get();
+            if (chapterDoc.exists) {
+                const subjectDoc = await db.collection('subjects').doc(chapterDoc.data().subject_id).get();
+                weakChapters.push({
+                    id: chapterId,
+                    chapter_name: chapterDoc.data().name,
+                    subject_name: subjectDoc.exists ? subjectDoc.data().name : 'Unknown',
+                    attempted: stats.total,
+                    correct: stats.correct,
+                    accuracy: ((stats.correct / stats.total) * 100).toFixed(2)
+                });
+            }
+        }
+        weakChapters.sort((a, b) => parseFloat(a.accuracy) - parseFloat(b.accuracy));
+
+        // Get recent wrong attempts
+        const wrongAttempts = attemptsSnapshot.docs
+            .filter(d => !d.data().is_correct)
+            .sort((a, b) => new Date(b.data().attempted_at) - new Date(a.data().attempted_at))
+            .slice(0, 10);
+
+        const recentMistakes = [];
+        for (const doc of wrongAttempts) {
+            const attempt = doc.data();
+            const questionDoc = await db.collection('questions').doc(attempt.question_id).get();
+            if (questionDoc.exists) {
+                recentMistakes.push({
+                    question_id: attempt.question_id,
+                    ...questionDoc.data(),
+                    user_answer: attempt.user_answer,
+                    attempted_at: attempt.attempted_at
+                });
+            }
+        }
 
         res.status(200).json({
             status: 'success',
-            data: {
-                weakChapters: weakChapters.rows,
-                recentMistakes: recentMistakes.rows
-            }
+            data: { weakChapters: weakChapters.slice(0, 5), recentMistakes }
         });
     });
 
-    // Send notification to student
     sendNotification = catchAsync(async (req, res, next) => {
         const { studentId, message } = req.body;
         const teacherId = req.user.id;
@@ -116,29 +128,30 @@ class TeacherController {
             return next(new AppError('Student ID and message are required', 400));
         }
 
-        // Verify relationship
-        const relationship = await db.query(
-            'SELECT id FROM followers WHERE follower_id = $1 AND following_id = $2',
-            [studentId, teacherId]
-        );
+        const relationship = await db.collection('followers')
+            .where('follower_id', '==', studentId)
+            .where('following_id', '==', teacherId)
+            .limit(1)
+            .get();
 
-        if (relationship.rows.length === 0) {
+        if (relationship.empty) {
             return next(new AppError('This student does not follow you', 403));
         }
 
-        // Create notification (we'll use messages table for now)
-        const result = await db.query(
-            `INSERT INTO messages (sender_id, receiver_id, content)
-             VALUES ($1, $2, $3)
-             RETURNING *`,
-            [teacherId, studentId, message]
-        );
+        const messageData = {
+            sender_id: teacherId,
+            receiver_id: studentId,
+            content: message,
+            is_read: false,
+            created_at: new Date().toISOString()
+        };
 
-        // Emit socket event if available
+        const docRef = await db.collection('messages').add(messageData);
+
         if (req.app.get('io')) {
             req.app.get('io').to(studentId).emit('teacher_notification', {
                 from: req.user.name,
-                message: message,
+                message,
                 timestamp: new Date()
             });
         }
@@ -146,50 +159,42 @@ class TeacherController {
         res.status(201).json({
             status: 'success',
             message: 'Notification sent successfully',
-            data: {
-                notification: result.rows[0]
-            }
+            data: { notification: { id: docRef.id, ...messageData } }
         });
     });
 
-    // Get doubts/questions shared with teacher
     getDoubts = catchAsync(async (req, res) => {
         const teacherId = req.user.id;
 
-        // Get messages with questions from students who follow this teacher
-        const query = `
-            SELECT 
-                m.id,
-                m.content,
-                m.question_id,
-                m.created_at,
-                m.is_read,
-                u.id as student_id,
-                u.name as student_name,
-                q.question_text,
-                q.option_a,
-                q.option_b,
-                q.option_c,
-                q.option_d,
-                q.correct_answer,
-                q.explanation
-            FROM messages m
-            JOIN users u ON m.sender_id = u.id
-            JOIN followers f ON f.follower_id = u.id AND f.following_id = $1
-            LEFT JOIN questions q ON m.question_id = q.id
-            WHERE m.receiver_id = $1 AND m.question_id IS NOT NULL
-            ORDER BY m.created_at DESC
-            LIMIT 50
-        `;
+        const messagesSnapshot = await db.collection('messages')
+            .where('receiver_id', '==', teacherId)
+            .orderBy('created_at', 'desc')
+            .limit(50)
+            .get();
 
-        const result = await db.query(query, [teacherId]);
+        const doubts = [];
+        for (const doc of messagesSnapshot.docs) {
+            const msg = doc.data();
+            if (!msg.question_id) continue;
+
+            const userDoc = await db.collection('users').doc(msg.sender_id).get();
+            const questionDoc = await db.collection('questions').doc(msg.question_id).get();
+
+            doubts.push({
+                id: doc.id,
+                content: msg.content,
+                created_at: msg.created_at,
+                is_read: msg.is_read,
+                student_id: msg.sender_id,
+                student_name: userDoc.exists ? userDoc.data().name : 'Unknown',
+                ...(questionDoc.exists ? questionDoc.data() : {})
+            });
+        }
 
         res.status(200).json({
             status: 'success',
-            results: result.rows.length,
-            data: {
-                doubts: result.rows
-            }
+            results: doubts.length,
+            data: { doubts }
         });
     });
 }

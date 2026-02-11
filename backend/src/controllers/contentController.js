@@ -1,168 +1,178 @@
-const db = require('../config/db');
+const { db } = require('../config/db');
 const catchAsync = require('../utils/catchAsync');
 const AppError = require('../utils/appError');
 
 class ContentController {
-  // 1. Get Subject List with Progress
-  async getSubjects(req, res, next) {
+  // Get all subjects with user progress
+  getSubjects = catchAsync(async (req, res) => {
     const userId = req.user.id;
 
-    const query = `
-      SELECT 
-        s.id,
-        s.name,
-        s.icon,
-        COUNT(DISTINCT q.id) AS total_questions,
-        COUNT(DISTINCT a.question_id) AS completed_questions,
-        ROUND(
-          (COUNT(DISTINCT a.question_id)::NUMERIC / NULLIF(COUNT(DISTINCT q.id), 0)) * 100,
-          2
-        ) AS progress
-      FROM subjects s
-      LEFT JOIN chapters c ON s.id = c.subject_id
-      LEFT JOIN questions q ON c.id = q.chapter_id
-      LEFT JOIN attempts a ON q.id = a.question_id AND a.user_id = $1
-      GROUP BY s.id
-      ORDER BY s.id ASC
-    `;
+    const subjectsSnapshot = await db.collection('subjects').orderBy('name').get();
 
-    const result = await db.query(query, [userId]);
+    const subjects = [];
+    for (const doc of subjectsSnapshot.docs) {
+      const subject = { id: doc.id, ...doc.data() };
+
+      // Get chapters count
+      const chaptersSnapshot = await db.collection('chapters')
+        .where('subject_id', '==', doc.id).get();
+
+      // Get total questions count
+      let totalQuestions = 0;
+      let completedQuestions = 0;
+
+      for (const chapterDoc of chaptersSnapshot.docs) {
+        const questionsSnapshot = await db.collection('questions')
+          .where('chapter_id', '==', chapterDoc.id).get();
+        totalQuestions += questionsSnapshot.size;
+
+        // Get user's attempts for these questions
+        if (userId) {
+          const questionIds = questionsSnapshot.docs.map(q => q.id);
+          if (questionIds.length > 0) {
+            // Firestore 'in' queries limited to 30, batch them
+            for (let i = 0; i < questionIds.length; i += 30) {
+              const batch = questionIds.slice(i, i + 30);
+              const attemptsSnapshot = await db.collection('attempts')
+                .where('user_id', '==', userId)
+                .where('question_id', 'in', batch)
+                .get();
+              completedQuestions += attemptsSnapshot.size;
+            }
+          }
+        }
+      }
+
+      const progress = totalQuestions > 0
+        ? ((completedQuestions / totalQuestions) * 100).toFixed(2)
+        : '0.00';
+
+      subjects.push({
+        ...subject,
+        total_questions: totalQuestions,
+        completed_questions: completedQuestions,
+        progress
+      });
+    }
 
     res.status(200).json({
       status: 'success',
-      results: result.rows.length,
-      data: {
-        subjects: result.rows
-      }
+      results: subjects.length,
+      data: { subjects }
     });
-  }
+  });
 
-  // 2. Get Chapters by Subject ID
-  async getChaptersBySubject(req, res) {
-    try {
-      const { subjectId } = req.params;
-      const { status, class: classLevel } = req.query;
-      const userId = req.user.id;
+  // Get chapters by subject
+  getChaptersBySubject = catchAsync(async (req, res, next) => {
+    const { subjectId } = req.params;
+    const userId = req.user.id;
+    const { class_level } = req.query;
 
-      console.log(`📚 Fetching chapters for Subject: ${subjectId}, User: ${userId}`);
+    let query = db.collection('chapters').where('subject_id', '==', subjectId);
 
-      let query = `
-            SELECT 
-                c.id,
-                c.name,
-                c.class_level,
-                c.is_reduced_syllabus,
-                s.name AS subject_name,
-                COUNT(distinct q.id) AS total_questions,
-                COUNT(distinct a.question_id) AS completed_questions,
-                ROUND((COUNT(distinct a.question_id)::NUMERIC / NULLIF(COUNT(distinct q.id), 0)) * 100, 2) AS progress
-            FROM 
-                chapters c
-            JOIN
-                subjects s ON c.subject_id = s.id
-            LEFT JOIN 
-                questions q ON c.id = q.chapter_id
-            LEFT JOIN 
-                attempts a ON q.id = a.question_id AND a.user_id = $1
-            WHERE 
-                c.subject_id = $2
-            `;
+    if (class_level) {
+      query = query.where('class_level', '==', parseInt(class_level));
+    }
 
-      const params = [userId, subjectId];
+    const chaptersSnapshot = await query.get();
 
-      if (classLevel) {
-        params.push(classLevel);
-        query += ` AND c.class_level = $${params.length}`;
-      }
+    const chapters = [];
+    for (const doc of chaptersSnapshot.docs) {
+      const chapter = { id: doc.id, ...doc.data() };
 
-      // GROUP BY must include all non-aggregated columns and come BEFORE HAVING
-      query += ` GROUP BY c.id, c.name, c.class_level, c.is_reduced_syllabus, s.name`;
+      // Get questions count
+      const questionsSnapshot = await db.collection('questions')
+        .where('chapter_id', '==', doc.id).get();
+      const totalQuestions = questionsSnapshot.size;
 
-      if (status) {
-        if (status === 'completed') {
-          query += ` HAVING COUNT(distinct a.question_id) = COUNT(distinct q.id)`;
-        } else if (status === 'in_progress') {
-          query += ` HAVING COUNT(distinct a.question_id) > 0 AND COUNT(distinct a.question_id) < COUNT(distinct q.id)`;
-        } else if (status === 'not_started') {
-          query += ` HAVING COUNT(distinct a.question_id) = 0`;
+      // Get user progress
+      let completedQuestions = 0;
+      const questionIds = questionsSnapshot.docs.map(q => q.id);
+      if (questionIds.length > 0) {
+        for (let i = 0; i < questionIds.length; i += 30) {
+          const batch = questionIds.slice(i, i + 30);
+          const attemptsSnapshot = await db.collection('attempts')
+            .where('user_id', '==', userId)
+            .where('question_id', 'in', batch)
+            .get();
+          completedQuestions += attemptsSnapshot.size;
         }
       }
 
-      query += ` ORDER BY c.class_level ASC, c.id ASC`;
+      const progress = totalQuestions > 0
+        ? ((completedQuestions / totalQuestions) * 100).toFixed(2)
+        : '0.00';
 
-      const result = await db.query(query, params);
+      // Get chapter progress status
+      const progressDoc = await db.collection('chapter_progress')
+        .where('user_id', '==', userId)
+        .where('chapter_id', '==', doc.id)
+        .limit(1)
+        .get();
 
-      console.log(`✅ Found ${result.rows.length} chapters`);
+      const status = progressDoc.empty ? 'not_started' : progressDoc.docs[0].data().status;
 
-      res.status(200).json({
-        status: 'success',
-        results: result.rows.length,
-        data: {
-          chapters: result.rows
-        }
-      });
-    } catch (error) {
-      console.error('❌ Error in getChaptersBySubject:', error);
-      res.status(500).json({
-        status: 'error',
-        message: 'Failed to fetch chapters',
-        error: error.message
+      chapters.push({
+        ...chapter,
+        total_questions: totalQuestions,
+        completed_questions: completedQuestions,
+        progress,
+        status
       });
     }
-  }
 
-  // 3. Get Chapter Breakdown (Detailed Stats)
-  async getChapterBreakdown(req, res) {
+    res.status(200).json({
+      status: 'success',
+      results: chapters.length,
+      data: { chapters }
+    });
+  });
+
+  // Get chapter breakdown (topics + questions)
+  getChapterBreakdown = catchAsync(async (req, res, next) => {
     const { chapterId } = req.params;
-    const result = await db.query(`
-      SELECT 
-        COUNT(*) FILTER (WHERE type = 'MCQ') as standard_mcq,
-        COUNT(*) FILTER (WHERE type = 'Assertion_Reason') as assertion_reason,
-        COUNT(*) FILTER (WHERE type = 'Match_Column') as match_column,
-        COUNT(*) FILTER (WHERE type = 'Diagram_Based') as diagram_based,
-        COUNT(*) FILTER (WHERE level = 'AIIMS_PYQ') as aiims_pyq,
-        COUNT(*) FILTER (WHERE level = 'NEET_PYQ') as neet_pyq
-      FROM questions 
-      WHERE chapter_id = $1
-    `, [chapterId]);
+
+    const chapterDoc = await db.collection('chapters').doc(chapterId).get();
+    if (!chapterDoc.exists) {
+      return next(new AppError('Chapter not found', 404));
+    }
+
+    const questionsSnapshot = await db.collection('questions')
+      .where('chapter_id', '==', chapterId).get();
+
+    const questions = questionsSnapshot.docs.map(doc => ({
+      id: doc.id, ...doc.data()
+    }));
 
     res.status(200).json({
       status: 'success',
       data: {
-        breakdown: result.rows[0]
+        chapter: { id: chapterDoc.id, ...chapterDoc.data() },
+        questions
       }
     });
-  }
+  });
 
-  // 4. Get Practice Questions (Randomized Engine)
-  async getPracticeQuestions(req, res) {
-    const { chapterId, type, level, limit = 10 } = req.query;
+  // Get practice questions
+  getPracticeQuestions = catchAsync(async (req, res) => {
+    const { chapterId } = req.params;
+    const { limit = 10 } = req.query;
 
-    let query = `SELECT * FROM questions WHERE chapter_id = $1`;
-    let params = [chapterId];
+    const questionsSnapshot = await db.collection('questions')
+      .where('chapter_id', '==', chapterId)
+      .limit(parseInt(limit))
+      .get();
 
-    if (type) {
-      params.push(type);
-      query += ` AND type = $${params.length}`;
-    }
-
-    if (level) {
-      params.push(level);
-      query += ` AND level = $${params.length}`;
-    }
-
-    query += ` ORDER BY RANDOM() LIMIT ${limit}`;
-
-    const result = await db.query(query, params);
+    const questions = questionsSnapshot.docs.map(doc => ({
+      id: doc.id, ...doc.data()
+    }));
 
     res.status(200).json({
       status: 'success',
-      results: result.rows.length,
-      data: {
-        questions: result.rows
-      }
+      results: questions.length,
+      data: { questions }
     });
-  }
+  });
 }
 
 module.exports = new ContentController();
